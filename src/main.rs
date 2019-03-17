@@ -3,9 +3,10 @@ extern crate futures;
 
 use tokio::prelude::*;
 use tokio::fs;
+use futures::sync::mpsc;
 use futures::{Future, Stream};
 
-fn visit_dirs_par(dir: String){
+fn visit_dirs_par(dir: String, tx: mpsc::Sender<String>) {
     let future = fs::read_dir(dir)
         .flatten_stream()
         .for_each( move |entry| {
@@ -13,22 +14,40 @@ fn visit_dirs_par(dir: String){
             let is_dir = std_entry.metadata().unwrap().is_dir();
             if is_dir {
                 let entry_path = std_entry.path().into_os_string().into_string().unwrap();
-                println!("{:?}", entry_path);
-                visit_dirs_par(entry_path);
+                visit_dirs_par(entry_path.clone(), tx.clone());
+                tokio::spawn(tx.clone().send(entry_path)
+                    .map(|_| ())
+                    .map_err(|_| ()));
             }
 
             future::ok(())
         })
-        .map_err(|e| eprintln!("Error reading directory: {}", e));
+        .map_err(|_| ());
 
-    tokio::spawn(future);
+   tokio::spawn(future);
 }
 
 fn main() {
-    let visit_future = future::poll_fn( move || {
-        visit_dirs_par(String::from("c:/"));
-        Ok(Async::Ready(()))
-    });
 
-    tokio::run(visit_future);
+    let (tx, rx) = mpsc::channel(1);
+
+    tokio::run(futures::lazy(move || {
+
+        tokio::spawn(
+            rx.for_each(move |value| {
+                println!("{}", value);
+                Ok(())
+            })
+        );
+
+        let visit_future = future::poll_fn( move || {
+            visit_dirs_par(String::from("c:/"), tx.clone());
+            Ok(Async::Ready(()))
+        });
+        tokio::spawn(visit_future);
+
+        Ok(())
+    })
+    );
+
 }
